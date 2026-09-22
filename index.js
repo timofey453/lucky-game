@@ -22,8 +22,8 @@ app.get('/', (req, res) => {
 // ======================
 // Хранилище
 // ======================
-const players = {};           // id -> { balance, name }
-let crashHistory = [];        // последние 10 множителей
+const players = {};
+let crashHistory = [];
 
 // ======================
 // РАКЕТА (CRASH)
@@ -32,25 +32,41 @@ let crashState = {
   status: 'waiting',          // waiting | flying | crashed
   multiplier: 1.00,
   crashPoint: 0,
-  bets: {},                   // socketId -> { amount, autoCashout, cashedOut }
-  startTime: null
+  bets: {},
+  timeLeft: 5                 // секунд до старта
 };
 
 function generateCrashPoint() {
-  // Чаще падает около 1.5x, редко до 4-6x
   const r = Math.random();
-  if (r < 0.55) return +(1.01 + Math.random() * 0.7).toFixed(2);      // 1.01 - 1.71
-  if (r < 0.85) return +(1.72 + Math.random() * 1.5).toFixed(2);      // 1.72 - 3.22
-  if (r < 0.97) return +(3.23 + Math.random() * 1.5).toFixed(2);      // 3.23 - 4.73
-  return +(4.74 + Math.random() * 1.3).toFixed(2);                    // 4.74 - 6.04
+  if (r < 0.55) return +(1.01 + Math.random() * 0.7).toFixed(2);
+  if (r < 0.85) return +(1.72 + Math.random() * 1.5).toFixed(2);
+  if (r < 0.97) return +(3.23 + Math.random() * 1.5).toFixed(2);
+  return +(4.74 + Math.random() * 1.3).toFixed(2);
 }
 
-function startCrashRound() {
+function startWaiting() {
+  crashState.status = 'waiting';
+  crashState.multiplier = 1.00;
+  crashState.bets = {};
+  crashState.timeLeft = 5;
+
+  io.emit('crash:waiting', { timeLeft: crashState.timeLeft });
+
+  const timer = setInterval(() => {
+    crashState.timeLeft--;
+    io.emit('crash:timer', { timeLeft: crashState.timeLeft });
+
+    if (crashState.timeLeft <= 0) {
+      clearInterval(timer);
+      startFlying();
+    }
+  }, 1000);
+}
+
+function startFlying() {
   crashState.status = 'flying';
   crashState.multiplier = 1.00;
   crashState.crashPoint = generateCrashPoint();
-  crashState.bets = {};
-  crashState.startTime = Date.now();
 
   io.emit('crash:start', { crashPoint: crashState.crashPoint });
 
@@ -61,30 +77,44 @@ function startCrashRound() {
     }
 
     crashState.multiplier = +(crashState.multiplier + 0.01).toFixed(2);
-
     io.emit('crash:tick', { multiplier: crashState.multiplier });
+
+    // Автовывод
+    for (const [id, bet] of Object.entries(crashState.bets)) {
+      if (!bet.cashedOut && bet.autoCashout && crashState.multiplier >= bet.autoCashout) {
+        bet.cashedOut = true;
+        const player = players[id];
+        if (player) {
+          const win = Math.floor(bet.amount * bet.autoCashout);
+          player.balance += win;
+          io.to(id).emit('crash:cashedOut', {
+            multiplier: bet.autoCashout,
+            win
+          });
+          io.to(id).emit('player:info', player);
+        }
+      }
+    }
 
     if (crashState.multiplier >= crashState.crashPoint) {
       clearInterval(interval);
       crashState.status = 'crashed';
 
-      // Сохраняем историю
       crashHistory.unshift(crashState.crashPoint);
       if (crashHistory.length > 10) crashHistory.pop();
 
-      io.emit('crash:crashed', { 
+      io.emit('crash:crashed', {
         crashPoint: crashState.crashPoint,
-        history: crashHistory 
+        history: crashHistory
       });
 
-      // Через 3 секунды новый раунд
-      setTimeout(startCrashRound, 3000);
+      setTimeout(startWaiting, 3500);
     }
   }, 100);
 }
 
-// Запускаем ракету сразу
-startCrashRound();
+// Запускаем первый цикл
+startWaiting();
 
 // ======================
 // SOCKET.IO
@@ -92,36 +122,40 @@ startCrashRound();
 io.on('connection', (socket) => {
   console.log('Игрок подключился:', socket.id);
 
-  // Регистрация игрока
   socket.on('player:join', (data) => {
     players[socket.id] = {
-      balance: 1000,          // стартовый баланс
+      balance: 0,
       name: data.name || 'Игрок'
     };
     socket.emit('player:info', players[socket.id]);
     socket.emit('crash:history', crashHistory);
+    socket.emit('crash:waiting', { timeLeft: crashState.timeLeft });
   });
 
-  // Ставка в ракету
   socket.on('crash:bet', (data) => {
     const player = players[socket.id];
     if (!player) return;
 
     const amount = Number(data.amount);
+    let auto = Number(data.autoCashout);
+
+    if (isNaN(auto) || auto < 1.1) auto = null;
+    if (auto > 10) auto = 10;
+
     if (amount < 10 || amount > player.balance) {
       socket.emit('error', { message: 'Недостаточно средств или ставка меньше 10' });
       return;
     }
 
-    if (crashState.status !== 'flying' && crashState.status !== 'waiting') {
-      socket.emit('error', { message: 'Сейчас нельзя ставить' });
+    if (crashState.status !== 'waiting') {
+      socket.emit('error', { message: 'Сейчас нельзя ставить. Ждите следующий раунд' });
       return;
     }
 
     player.balance -= amount;
     crashState.bets[socket.id] = {
       amount,
-      autoCashout: data.autoCashout || null,
+      autoCashout: auto,
       cashedOut: false
     };
 
@@ -129,7 +163,6 @@ io.on('connection', (socket) => {
     socket.emit('crash:betAccepted', { amount });
   });
 
-  // Ручной вывод в ракете
   socket.on('crash:cashout', () => {
     const bet = crashState.bets[socket.id];
     const player = players[socket.id];
@@ -139,9 +172,9 @@ io.on('connection', (socket) => {
     const win = Math.floor(bet.amount * crashState.multiplier);
     player.balance += win;
 
-    socket.emit('crash:cashedOut', { 
-      multiplier: crashState.multiplier, 
-      win 
+    socket.emit('crash:cashedOut', {
+      multiplier: crashState.multiplier,
+      win
     });
     socket.emit('player:info', player);
   });
