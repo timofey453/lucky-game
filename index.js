@@ -9,31 +9,22 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 app.get('/', (req, res) => {
   res.send('Lucky Game сервер работает!');
 });
 
-// ======================
-// Хранилище
-// ======================
 const players = {};
 let crashHistory = [];
 
-// ======================
-// РАКЕТА (CRASH)
-// ======================
 let crashState = {
-  status: 'waiting',          // waiting | flying | crashed
+  status: 'waiting',
   multiplier: 1.00,
   crashPoint: 0,
   bets: {},
-  timeLeft: 5                 // секунд до старта
+  timeLeft: 5
 };
 
 function generateCrashPoint() {
@@ -42,6 +33,14 @@ function generateCrashPoint() {
   if (r < 0.85) return +(1.72 + Math.random() * 1.5).toFixed(2);
   if (r < 0.97) return +(3.23 + Math.random() * 1.5).toFixed(2);
   return +(4.74 + Math.random() * 1.3).toFixed(2);
+}
+
+function getStep(mult) {
+  // Ускорение
+  if (mult >= 4.0) return 0.045;
+  if (mult >= 3.0) return 0.03;
+  if (mult >= 2.0) return 0.02;
+  return 0.01;
 }
 
 function startWaiting() {
@@ -76,8 +75,13 @@ function startFlying() {
       return;
     }
 
-    crashState.multiplier = +(crashState.multiplier + 0.01).toFixed(2);
-    io.emit('crash:tick', { multiplier: crashState.multiplier });
+    const step = getStep(crashState.multiplier);
+    crashState.multiplier = +(crashState.multiplier + step).toFixed(2);
+
+    io.emit('crash:tick', { 
+      multiplier: crashState.multiplier,
+      accelerating: crashState.multiplier >= 2.0
+    });
 
     // Автовывод
     for (const [id, bet] of Object.entries(crashState.bets)) {
@@ -87,10 +91,7 @@ function startFlying() {
         if (player) {
           const win = Math.floor(bet.amount * bet.autoCashout);
           player.balance += win;
-          io.to(id).emit('crash:cashedOut', {
-            multiplier: bet.autoCashout,
-            win
-          });
+          io.to(id).emit('crash:cashedOut', { multiplier: bet.autoCashout, win });
           io.to(id).emit('player:info', player);
         }
       }
@@ -110,15 +111,11 @@ function startFlying() {
 
       setTimeout(startWaiting, 3500);
     }
-  }, 100);
+  }, 80);
 }
 
-// Запускаем первый цикл
 startWaiting();
 
-// ======================
-// SOCKET.IO
-// ======================
 io.on('connection', (socket) => {
   console.log('Игрок подключился:', socket.id);
 
@@ -138,7 +135,6 @@ io.on('connection', (socket) => {
 
     const amount = Number(data.amount);
     let auto = Number(data.autoCashout);
-
     if (isNaN(auto) || auto < 1.1) auto = null;
     if (auto > 10) auto = 10;
 
@@ -181,7 +177,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     delete players[socket.id];
-    console.log('Игрок отключился:', socket.id);
   });
 });
 
