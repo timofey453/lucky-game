@@ -36,11 +36,10 @@ function generateCrashPoint() {
 }
 
 function getStep(mult) {
-  // Ускорение
-  if (mult >= 4.0) return 0.045;
-  if (mult >= 3.0) return 0.03;
-  if (mult >= 2.0) return 0.02;
-  return 0.01;
+  if (mult >= 4.0) return 0.05;
+  if (mult >= 3.0) return 0.035;
+  if (mult >= 2.0) return 0.022;
+  return 0.012;
 }
 
 function startWaiting() {
@@ -111,7 +110,7 @@ function startFlying() {
 
       setTimeout(startWaiting, 3500);
     }
-  }, 80);
+  }, 70);
 }
 
 startWaiting();
@@ -121,7 +120,7 @@ io.on('connection', (socket) => {
 
   socket.on('player:join', (data) => {
     players[socket.id] = {
-      balance: 0,
+      balance: 10,          // временно 10 звёзд для теста
       name: data.name || 'Игрок'
     };
     socket.emit('player:info', players[socket.id]);
